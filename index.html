@@ -172,7 +172,11 @@ const REFRESH_MS = 120000; // 2 min
 let chart = null;
 
 async function fetchSignals() {
-  const url = `${SUPABASE_URL}/rest/v1/${TABLE}?select=ts,symbol,price,ema_fast,ema_slow,adx,atr,signal_type,action&order=ts.desc&limit=${ROWS_TO_FETCH}`;
+  // Solo filas con ema_fast no nulo: las migradas del histórico viejo no
+  // tienen precio/EMA capturado (se empezó a guardar recién con esta
+  // versión del agente) — mezclarlas con las nuevas deja casi todo el
+  // gráfico vacío para esas tres líneas.
+  const url = `${SUPABASE_URL}/rest/v1/${TABLE}?select=ts,symbol,price,ema_fast,ema_slow,adx,atr,signal_type,action&ema_fast=not.is.null&order=ts.desc&limit=${ROWS_TO_FETCH}`;
   const resp = await fetch(url, {
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -292,6 +296,14 @@ function renderPanel(rows) {
   const velasDesdeCruce = findLastCross(rows);
   const narrative = buildNarrative(latest, velasDesdeCruce, rows.length);
 
+  const warmupNote = rows.length < 20
+    ? `<p style="color:var(--text-muted); font-size:12px; margin:10px 0 0;">
+         Solo ${rows.length} vela${rows.length === 1 ? "" : "s"} con datos completos todavía —
+         el histórico anterior no tenía precio/EMA guardado. El gráfico se va a ir llenando
+         solo, cada 15 min, a medida que el agente sigue corriendo.
+       </p>`
+    : "";
+
   document.getElementById("content").innerHTML = `
     <div class="card">
       <div class="card-top">
@@ -313,6 +325,7 @@ function renderPanel(rows) {
         <span>última señal <strong>${latest.signal_type}</strong></span>
       </div>
       <div class="narrative">${narrative.html}</div>
+      ${warmupNote}
     </div>
   `;
   renderChart(rows);
