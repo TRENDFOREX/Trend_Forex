@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TREND_FOREX · Estado de señal</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0B0E13;
+    --panel: #12161D;
+    --panel-border: #1E242E;
+    --text: #E8EAED;
+    --text-muted: #8B93A1;
+    --price: #E8EAED;
+    --ema-fast: #5AC8FA;
+    --ema-slow: #C77DFF;
+    --adx: #E8B339;
+    --good: #3DDC84;
+    --warn: #E8B339;
+    --bad: #FF6B6B;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 32px 24px 64px;
+  }
+  .mono { font-family: "SF Mono", "Cascadia Code", Consolas, monospace; }
+
+  header {
+    max-width: 920px;
+    margin: 0 auto 24px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  header h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  header .updated {
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  .card {
+    max-width: 920px;
+    margin: 0 auto;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 24px;
+  }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .card-title {
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    padding: 3px 10px 3px 8px;
+    border-radius: 999px;
+    background: rgba(61, 220, 132, 0.12);
+    color: var(--good);
+    border: 1px solid rgba(61, 220, 132, 0.3);
+  }
+  .badge.stale {
+    background: rgba(255, 107, 107, 0.12);
+    color: var(--bad);
+    border-color: rgba(255, 107, 107, 0.3);
+  }
+  .badge .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: currentColor;
+  }
+
+  .subline {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-bottom: 18px;
+  }
+
+  .chart-wrap { position: relative; height: 320px; margin-bottom: 18px; }
+
+  .stats-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 22px;
+    font-size: 13px;
+    color: var(--text-muted);
+    padding: 12px 0;
+    border-top: 1px solid var(--panel-border);
+    border-bottom: 1px solid var(--panel-border);
+    margin-bottom: 16px;
+  }
+  .stats-row strong { color: var(--text); font-weight: 600; }
+
+  .narrative {
+    background: #0E1218;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .narrative b { color: var(--text); }
+  .narrative .cerca { color: var(--warn); font-weight: 600; }
+  .narrative .lejos { color: var(--text-muted); font-weight: 600; }
+
+  footer {
+    max-width: 920px;
+    margin: 20px auto 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .loading, .error {
+    max-width: 920px; margin: 0 auto; color: var(--text-muted); font-size: 14px;
+  }
+  .error { color: var(--bad); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>TREND_FOREX · Estado de señal</h1>
+  <span class="updated mono" id="updated-at">cargando...</span>
+</header>
+
+<div id="content">
+  <p class="loading">Consultando Supabase...</p>
+</div>
+
+<footer>
+  Panel informativo de solo lectura. No ejecuta ni modifica nada. Se actualiza cada 2 min.
+  Un panel viejo NO significa que el sistema esté mal — verificar siempre en la mini PC / Telegram
+  ante datos rancios.
+</footer>
+
+<script>
+// ==== CONFIGURACIÓN — completar antes de publicar ====
+// La anon key es PÚBLICA por diseño de Supabase (la seguridad la da RLS,
+// que solo permite SELECT — nunca INSERT/UPDATE/DELETE con esta key).
+// Nunca pongas acá la service_role key.
+const SUPABASE_URL = "PEGAR_TU_SUPABASE_URL_ACA";
+const SUPABASE_ANON_KEY = "PEGAR_TU_SUPABASE_ANON_KEY_ACA";
+const TABLE = "trend_forex_signals";
+const ROWS_TO_FETCH = 120;
+const ADX_THRESHOLD = 25;
+const STALE_MINUTES = 30; // si el último dato es más viejo que esto, se marca "sin datos recientes"
+const REFRESH_MS = 120000; // 2 min
+
+let chart = null;
+
+async function fetchSignals() {
+  const url = `${SUPABASE_URL}/rest/v1/${TABLE}?select=ts,symbol,price,ema_fast,ema_slow,adx,atr,signal_type,action&order=ts.desc&limit=${ROWS_TO_FETCH}`;
+  const resp = await fetch(url, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    },
+  });
+  if (!resp.ok) throw new Error(`Supabase respondió ${resp.status}`);
+  const rows = await resp.json();
+  return rows.reverse(); // más antiguo primero, para graficar en orden cronológico
+}
+
+function findLastCross(rows) {
+  // Busca el índice (desde el final) donde ema_fast - ema_slow cambió de signo.
+  const clean = rows.filter(r => r.ema_fast != null && r.ema_slow != null);
+  if (clean.length < 2) return null;
+  let prevSign = Math.sign(clean[clean.length - 1].ema_fast - clean[clean.length - 1].ema_slow);
+  for (let i = clean.length - 2; i >= 0; i--) {
+    const sign = Math.sign(clean[i].ema_fast - clean[i].ema_slow);
+    if (sign !== 0 && sign !== prevSign) {
+      return clean.length - 1 - i; // velas atrás desde la más reciente
+    }
+    if (sign !== 0) prevSign = sign;
+  }
+  return null; // sin cruce dentro de la ventana
+}
+
+function buildNarrative(latest, velasDesdeCruce, totalVelas) {
+  const distancia = Math.abs(latest.ema_fast - latest.ema_slow);
+  const adx = latest.adx;
+  const adxFalta = Math.max(0, ADX_THRESHOLD - adx);
+
+  const cruceTxt = velasDesdeCruce !== null
+    ? `hace ${velasDesdeCruce} vela${velasDesdeCruce === 1 ? "" : "s"}`
+    : `ninguno (${totalVelas} velas)`;
+
+  let cercaLejos, cercaLejosClass;
+  if (adx >= ADX_THRESHOLD) {
+    cercaLejos = "CONDICIÓN DE TENDENCIA CUMPLIDA — esperando alineación de EMAs";
+    cercaLejosClass = "cerca";
+  } else if (adxFalta <= 3) {
+    cercaLejos = "CERCA de señal";
+    cercaLejosClass = "cerca";
+  } else {
+    cercaLejos = "LEJOS de señal";
+    cercaLejosClass = "lejos";
+  }
+
+  return {
+    html: `Las EMAs (20/50) están a <b>${distancia.toFixed(5)}</b> de distancia entre sí;
+           el ADX está en <b>${adx.toFixed(1)}</b> (necesita ≥ ${ADX_THRESHOLD}).
+           Cruce reciente: <b>${cruceTxt}</b>. → <span class="${cercaLejosClass}">${cercaLejos}</span>.`,
+  };
+}
+
+function renderChart(rows) {
+  const canvas = document.getElementById("signal-chart");
+  if (typeof Chart === "undefined") {
+    canvas.parentElement.innerHTML =
+      '<p class="error" style="padding:12px 0;">No se pudo cargar la librería de gráficos (Chart.js) — revisá tu conexión o si el CDN está bloqueado. Los datos numéricos de abajo siguen siendo correctos.</p>';
+    return;
+  }
+  const ctx = canvas.getContext("2d");
+  const labels = rows.map(r => {
+    const d = new Date(r.ts);
+    return d.toLocaleString("es-PE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  });
+
+  const data = {
+    labels,
+    datasets: [
+      {
+        label: "precio", data: rows.map(r => r.price), yAxisID: "y",
+        borderColor: "#E8EAED", borderWidth: 1.5, pointRadius: 0, tension: 0.15,
+      },
+      {
+        label: "EMA rápida (20)", data: rows.map(r => r.ema_fast), yAxisID: "y",
+        borderColor: "#5AC8FA", borderWidth: 1.5, pointRadius: 0, tension: 0.15,
+      },
+      {
+        label: "EMA lenta (50)", data: rows.map(r => r.ema_slow), yAxisID: "y",
+        borderColor: "#C77DFF", borderWidth: 1.5, pointRadius: 0, tension: 0.15,
+      },
+      {
+        label: "ADX", data: rows.map(r => r.adx), yAxisID: "y1",
+        borderColor: "#E8B339", borderWidth: 1.5, borderDash: [4, 3], pointRadius: 0, tension: 0.15,
+      },
+      {
+        label: `ADX ${ADX_THRESHOLD}`, data: rows.map(() => ADX_THRESHOLD), yAxisID: "y1",
+        borderColor: "rgba(232, 179, 57, 0.35)", borderWidth: 1, pointRadius: 0, borderDash: [2, 3],
+      },
+    ],
+  };
+
+  const options = {
+    responsive: true, maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { labels: { color: "#8B93A1", boxWidth: 12, font: { size: 11 } } },
+      tooltip: { titleFont: { size: 11 }, bodyFont: { size: 11 } },
+    },
+    scales: {
+      x: { ticks: { color: "#8B93A1", maxTicksLimit: 8, font: { size: 10 } }, grid: { color: "#1E242E" } },
+      y: { position: "left", ticks: { color: "#8B93A1", font: { size: 10 } }, grid: { color: "#1E242E" } },
+      y1: { position: "right", ticks: { color: "#8B93A1", font: { size: 10 } }, grid: { drawOnChartArea: false } },
+    },
+  };
+
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, { type: "line", data, options });
+}
+
+function renderPanel(rows) {
+  const latest = rows[rows.length - 1];
+  const ageMinutes = (Date.now() - new Date(latest.ts).getTime()) / 60000;
+  const isStale = ageMinutes > STALE_MINUTES;
+
+  const velasDesdeCruce = findLastCross(rows);
+  const narrative = buildNarrative(latest, velasDesdeCruce, rows.length);
+
+  document.getElementById("content").innerHTML = `
+    <div class="card">
+      <div class="card-top">
+        <span class="card-title">${latest.symbol} · tendencia H4</span>
+        <span class="badge ${isStale ? "stale" : ""}">
+          <span class="dot"></span>${isStale ? "sin datos recientes" : "en vivo"}
+        </span>
+      </div>
+      <div class="subline mono">
+        última vela: ${new Date(latest.ts).toLocaleString("es-PE")} ·
+        antigüedad: ${ageMinutes.toFixed(0)} min · acción: ${latest.action}
+      </div>
+      <div class="chart-wrap"><canvas id="signal-chart"></canvas></div>
+      <div class="stats-row mono">
+        <span>EMA rápida <strong>${latest.ema_fast?.toFixed(5) ?? "N/D"}</strong></span>
+        <span>EMA lenta <strong>${latest.ema_slow?.toFixed(5) ?? "N/D"}</strong></span>
+        <span>ADX <strong>${latest.adx?.toFixed(1) ?? "N/D"} / ${ADX_THRESHOLD}</strong></span>
+        <span>ATR <strong>${latest.atr?.toFixed(5) ?? "N/D"}</strong></span>
+        <span>última señal <strong>${latest.signal_type}</strong></span>
+      </div>
+      <div class="narrative">${narrative.html}</div>
+    </div>
+  `;
+  renderChart(rows);
+}
+
+async function refresh() {
+  let rows;
+  try {
+    rows = await fetchSignals();
+  } catch (err) {
+    document.getElementById("content").innerHTML =
+      `<p class="error">Error consultando Supabase: ${err.message}</p>`;
+    return;
+  }
+  if (!rows.length) {
+    document.getElementById("content").innerHTML = `<p class="error">Sin datos todavía en Supabase.</p>`;
+    return;
+  }
+  try {
+    renderPanel(rows);
+    document.getElementById("updated-at").textContent =
+      "actualizado " + new Date().toLocaleTimeString("es-PE");
+  } catch (err) {
+    document.getElementById("content").innerHTML =
+      `<p class="error">Datos recibidos de Supabase, pero falló el renderizado: ${err.message}</p>`;
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+
+</body>
+</html>
